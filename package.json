@@ -1,7 +1,8 @@
 {
-  "name": "node-15-minutos",
+  "name": "15-minutos",
   "version": "1.0.0",
   "description": "aprendiendo node en 15 minutos",
+  "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "nodemon index.js",
@@ -10,11 +11,24 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@google/genai": "^1.38.0",
+    "@google/generative-ai": "^0.24.1",
     "axios": "^1.13.4",
+    "dotenv": "^17.2.3",
     "express": "^5.2.1",
-    "fast-xml-parser": "^5.3.3"
+    "fast-xml-parser": "^5.3.3",
+    "pg": "^8.17.2"
   },
   "devDependencies": {
     "nodemon": "^3.1.11"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jperaza95/botCompras.git"
+  },
+  "keywords": [],
+  "bugs": {
+    "url": "https://github.com/jperaza95/botCompras/issues"
+  },
+  "homepage": "https://github.com/jperaza95/botCompras#readme"
 }

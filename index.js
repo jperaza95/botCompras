@@ -1,98 +1,177 @@
-const express = require("express");
+// 1. IMPORTACIONES (Todas al principio)
+import 'dotenv/config';
+import express from 'express';
+import { GoogleGenAI } from "@google/genai";
+import pg from 'pg';
+import axios from 'axios';
+import { XMLParser } from 'fast-xml-parser';
+
+// 2. CONFIGURACIÓN INICIAL
+const { Pool } = pg;
 const app = express();
-const port = 3127;
+const port = 3000;
 
-app.use(express.json()); // se convierten todos los datos a json
+// 3. CONFIGURACIÓN DE IA
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+//const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// Usamos flash que es más rápido, pero puedes dejar pro si prefieres
+// const modelIA = genAI.getGenerativeModel({
+//     model: "gemini-1.5-flash"
+// });
 
-/*let videojuegos = [{id:1,titulo:"Red Dead Redemption 2", precio: 20},
-    {id:2,titulo:"Mafia 1", precio: 27},
-    {id:3,titulo:"Gta V", precio: 110}
-];
+app.use(express.json());
 
-//recibe la request del usuario y la respuesta.
-app.get("/",(req,res)=>{
-    return res.json("Hola que tal soy Sauls");
-})
+// 4. CONEXIÓN A POSTGRES
+const pool = new Pool({
+    user: process.env.DB_USER,
+    host: process.env.DB_HOST,
+    database: process.env.DB_NAME,
+    password: process.env.DB_PASSWORD,
+    port: process.env.DB_PORT,
+});
 
-app.get("/mis-videojuegos",(req,res)=>{
-    return res.json([
-        videojuegos[0], videojuegos[2]
+// --- RUTA HTTP ---
+app.get('/licitaciones', async (req, res) => {
+    try {
+        const resultado = await pool.query('SELECT id, titulo, organismo, rubro_ia, link, fecha_publicacion FROM licitaciones ORDER BY creado_en DESC');
 
-    ]);
-})
+        let html = `
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>Panel de Licitaciones</title>
+                <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+            </head>
+            <body class="container mt-5">
+                <h2 class="mb-4">📋 Licitaciones Detectadas (${resultado.rowCount})</h2>
+                <table class="table table-striped table-hover border">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>ID</th>
+                            <th>Título</th>
+                            <th>Rubro IA</th>
+                            <th>Fecha</th>
+                            <th>Acción</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
 
-app.post("/guardar-juego",(req,res)=>{
-    let nuevoJuego ={
-        id: videojuegos.length+1,
-        titulo: req.body.titulo,
-        precio: req.body.precio
+        resultado.rows.forEach(fila => {
+            html += `
+                <tr>
+                    <td>${fila.id}</td>
+                    <td><strong>${fila.titulo}</strong></td>
+                    <td><span class="badge bg-success">${fila.rubro_ia || 'Analizando...'}</span></td>
+                    <td>${fila.fecha_publicacion}</td>
+                    <td><a href="${fila.link}" target="_blank" class="btn btn-sm btn-outline-primary">Ver Pliego</a></td>
+                </tr>
+            `;
+        });
+
+        html += `</tbody></table></body></html>`;
+        res.send(html);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send("Error al generar la tabla");
     }
-    videojuegos.push(nuevoJuego);
-    return res.status(200).json(nuevoJuego);
-})*/
+});
 
-const axios = require('axios');
-const { XMLParser } = require('fast-xml-parser');
-
+// --- FUNCIONES DE LÓGICA ---
 async function analizarRSS() {
-    // La URL de Compras Estatales
-    const url = "https://www.comprasestatales.gub.uy/consultas/rss/tipo-pub/ALL/tipo-fecha/MOD/orden/ORD_MOD/tipo-orden/DESC/rango-fecha/2026-01-15+00%3A00%3A00_2026-01-21+23%3A59%3A59";
+    const url = generarURLRSS(); //"https://www.comprasestatales.gub.uy/consultas/rss/tipo-pub/ALL/tipo-fecha/MOD/orden/ORD_MOD/tipo-orden/DESC/rango-fecha/2026-01-15+00%3A00%3A00_2026-01-21+23%3A59%3A59";
 
     try {
-        console.log("--- Conectando con ARCE... ---");
-        const response = await axios.get(url,{
+        console.log("--- 📡 Conectando con ARCE... ---");
+        const response = await axios.get(url, {
             headers: {
-                // Este es el "disfraz". Le decimos que somos un Chrome en Windows.
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36...',
                 'Accept': 'application/xml, text/xml, */*',
-                'Accept-Language': 'es-ES,es;q=0.9',
             }
-            
-
         });
-        console.log("¡Conexión exitosa!");
-        // Aquí sigues con el parser...
-        
+
         const parser = new XMLParser();
         const jObj = parser.parse(response.data);
-
-        // El RSS estructura la data en: rss -> channel -> item (array)
         const items = jObj.rss.channel.item;
-        
-        console.log(`Se encontraron ${items.length} publicaciones recientes.\n`);
 
-        // Analizamos las primeras 3 para ver la estructura exacta
-        items.slice(0, 3).forEach((item, index) => {
-            console.log(`--- Licitación #${index + 1} ---`);
-            console.log(`Título: ${item.title}`);
-            console.log(`Link: ${item.link}`);
-            console.log(`Fecha Pub: ${item.pubDate}`);
-            // La descripción suele traer el organismo y el tipo de compra
-            console.log(`Descripción resumida: ${item.description.substring(0, 100)}...`);
-            console.log("----------------------------\n");
-        });
+        console.log(`Leídas ${items.length} licitaciones.`);
 
-        // Tip para tu cliente: Así es como filtraríamos por rubro
-        const rubroBuscado = "limpieza";
-        const filtrados = items.filter(i => 
-            i.title.toLowerCase().includes(rubroBuscado) || 
-            i.description.toLowerCase().includes(rubroBuscado)
-        );
+        let nuevas = 0;
+        for (const item of items) {
+            const query = `
+                INSERT INTO licitaciones (guid, titulo, link, fecha_publicacion, descripcion)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (guid) DO NOTHING
+                RETURNING id;
+            `;
+            const values = [item.guid || item.link, item.title, item.link, item.pubDate, item.description];
+            const res = await pool.query(query, values);
+            if (res.rowCount > 0) nuevas++;
+        }
 
-        console.log(`Resultado del filtro para '${rubroBuscado}': ${filtrados.length} coincidencias.`);
+        console.log(`✅ Sincronización completa: ${nuevas} nuevas.`);
+        await clasificarPendientes();
 
     } catch (error) {
-        console.error("Error al leer el RSS:", error.message);
+        console.error("❌ Error en el proceso: ", error.message);
     }
 }
 
+async function clasificarPendientes() {
+    console.log("--- 🧠 Analizando con Gemini ---");
+    const res = await pool.query('SELECT id, titulo, descripcion FROM licitaciones WHERE analizado = FALSE LIMIT 10');
+
+    for (const lic of res.rows) {
+        try {
+            const prompt = `Define el rubro de esta licitación uruguaya en UNA SOLA PALABRA (Ej: Software, Salud, Construcción, Limpieza).
+            Título: ${lic.titulo}
+            Categoría:`;
+
+            // Cambiamos la estructura para que coincida con lo que espera @google/genai
+            const result = await ai.models.generateContent({
+                model: "gemini-3-flash-preview", // Te recomiendo 1.5-flash por estabilidad
+                contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            });
+
+            // En @google/genai la respuesta está directamente en .text
+            const respuestaIA = result.text.trim().replace(/[^a-zA-ZáéíóúÁÉÍÓÚ]/g, "");
+
+            await pool.query(
+                'UPDATE licitaciones SET rubro_ia = $1, analizado = TRUE WHERE id = $2',
+                [respuestaIA, lic.id]
+            );
+
+            console.log(`🤖 ID ${lic.id} clasificado: ${respuestaIA}`);
+        } catch (err) {
+            console.error(`❌ Error en IA ID ${lic.id}:`, err.message);
+        }
+    }
+}
+
+
+
+function generarURLRSS() {
+    const hoy = new Date();
+    const hace7 = new Date();
+    hace7.setDate(hoy.getDate() - 7);
+
+    const formatoArce = (fecha, hora) => {
+        const y = fecha.getFullYear();
+        const m = String(fecha.getMonth() + 1).padStart(2, '0');
+        const d = String(fecha.getDate()).padStart(2, '0');
+        // ARCE usa %3A para los ":" en la URL
+        return `${y}-${m}-${d}+${hora}`;
+    };
+
+    const fechaInicio = formatoArce(hace7, "00%3A00%3A00");
+    const fechaFin = formatoArce(hoy, "23%3A59%3A59");
+
+    return `https://www.comprasestatales.gub.uy/consultas/rss/tipo-pub/ALL/tipo-fecha/MOD/orden/ORD_MOD/tipo-orden/DESC/rango-fecha/${fechaInicio}_${fechaFin}`;
+}
+
+// 5. INICIO DEL SISTEMA
 analizarRSS();
 
-
-//se pasa el puerto (port) y una funcion anonima por parametro, que se ejecuta cada vez que el servidor arranque
-
-app.listen(port,()=>{
-    console.log("Servidor de node escuchando en http://localhost:"+port)
-
-})
-
+app.listen(port, () => {
+    console.log(`🚀 Servidor listo en http://localhost:${port}/licitaciones`);
+});
