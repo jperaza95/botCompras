@@ -1,7 +1,6 @@
 // 1. IMPORTACIONES (Todas al principio)
 import 'dotenv/config';
 import express from 'express';
-import { GoogleGenAI } from "@google/genai";
 import pg from 'pg';
 import axios from 'axios';
 import { XMLParser } from 'fast-xml-parser';
@@ -11,13 +10,6 @@ const { Pool } = pg;
 const app = express();
 const port = 3000;
 
-// 3. CONFIGURACIÓN DE IA
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-//const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-// Usamos flash que es más rápido, pero puedes dejar pro si prefieres
-// const modelIA = genAI.getGenerativeModel({
-//     model: "gemini-1.5-flash"
-// });
 
 app.use(express.json());
 
@@ -30,56 +22,114 @@ const pool = new Pool({
     port: process.env.DB_PORT,
 });
 
+// --- 1. DICCIONARIO DE RUBROS ---
+const DICCIONARIO_RUBROS = {
+  'Seguridad': {
+    palabras: ['alarma', 'vigilancia', 'monitoreo', 'cámara', 'seguridad', 'custodia', 'sereno', 'guardia'],
+    peso: 2
+  },
+  'Informática': {
+    palabras: ['impresora', 'cartucho', 'toner', 'computadora', 'software', 'hardware', 'servidor', 'router', 'switch', 'notebook', 'laptop', 'licencia', 'ups', 'scanner'],
+    peso: 2
+  },
+  'Oficina': {
+    palabras: ['papel', 'librería', 'oficina', 'escritorio', 'resma', 'bibliorato', 'tinta', 'bolígrafo', 'silla', 'mueble'],
+    peso: 1
+  },
+  'Limpieza': {
+    palabras: ['limpieza', 'aseo', 'hipoclorito', 'jabon', 'detergente', 'papel higienico', 'residuos', 'fumigación', 'desinfección'],
+    peso: 2
+  },
+  'Salud': {
+    palabras: ['medicamento', 'farmacia', 'hospital', 'clínica', 'médico', 'suero', 'jeringa', 'paciente', 'asse', 'laboratorio', 'reactivo'],
+    peso: 2
+  },
+  'Construcción': {
+    palabras: ['obra', 'reparación', 'albañilería', 'pintura', 'cemento', 'arquitectura', 'remodelación', 'impermeabilización', 'eléctrica', 'sanitaria', 'vidrio'],
+    peso: 2
+  },
+  'Vehículos': {
+    palabras: ['vehículo', 'camioneta', 'auto', 'motor', 'neumático', 'cubierta', 'aceite', 'mantenimiento de flota', 'taller mecánico', 'repuesto'],
+    peso: 2
+  },
+  'Alimentos': {
+    palabras: ['alimento', 'comida', 'víveres', 'carne', 'verdura', 'cocina', 'merienda', 'bebida', 'supermercado'],
+    peso: 2
+  }
+};
+
+
+// --- 2. FUNCIÓN DE CLASIFICACIÓN (Solo Diccionario) ---
+function clasificarPorDiccionario(titulo, descripcion) {
+    const texto = `${titulo} ${descripcion}`.toLowerCase();
+    const puntuaciones = {};
+
+    for (const [rubro, config] of Object.entries(DICCIONARIO_RUBROS)) {
+        let puntos = 0;
+        for (const palabra of config.palabras) {
+            if (texto.includes(palabra.toLowerCase())) {
+                puntos += config.peso;
+            }
+        }
+        if (puntos > 0) {
+            puntuaciones[rubro] = puntos;
+        }
+    }
+
+    // Si no encontró nada, devuelve null (para que luego asignemos "Otros")
+    if (Object.keys(puntuaciones).length === 0) return null;
+
+    // Retorna el rubro con mayor puntaje
+    return Object.entries(puntuaciones).sort((a, b) => b[1] - a[1])[0][0];
+}
+
+
 // --- RUTA HTTP ---
 app.get('/licitaciones', async (req, res) => {
     try {
-        const resultado = await pool.query('SELECT id, titulo, organismo, rubro_ia, link, fecha_publicacion FROM licitaciones ORDER BY creado_en DESC');
+        const busqueda = req.query.buscar || '';
+        const querySQL = `
+            SELECT id, titulo, organismo, rubro_ia, link, fecha_publicacion 
+            FROM licitaciones 
+            WHERE titulo ILIKE $1 
+            ORDER BY creado_en DESC 
+        `;
+        const resultado = await pool.query(querySQL, [`%${busqueda}%`]);
 
         let html = `
             <html>
             <head>
-                <meta charset="UTF-8">
-                <title>Panel de Licitaciones</title>
                 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+                <title>Panel de Licitaciones</title>
             </head>
             <body class="container mt-5">
-                <h2 class="mb-4">📋 Licitaciones Detectadas (${resultado.rowCount})</h2>
-                <table class="table table-striped table-hover border">
-                    <thead class="table-dark">
-                        <tr>
-                            <th>ID</th>
-                            <th>Título</th>
-                            <th>Rubro IA</th>
-                            <th>Fecha</th>
-                            <th>Acción</th>
-                        </tr>
-                    </thead>
+                <h2>📋 Licitaciones (${resultado.rowCount})</h2>
+                <form action="/licitaciones" method="GET" class="mb-3">
+                    <input type="text" name="buscar" class="form-control" placeholder="Buscar por título..." value="${busqueda}">
+                </form>
+                <table class="table table-striped table-hover">
+                    <thead class="table-dark"><tr><th>Título</th><th>Rubro (Diccionario)</th><th>Acción</th></tr></thead>
                     <tbody>
         `;
-
         resultado.rows.forEach(fila => {
-            html += `
-                <tr>
-                    <td>${fila.id}</td>
-                    <td><strong>${fila.titulo}</strong></td>
-                    <td><span class="badge bg-success">${fila.rubro_ia || 'Analizando...'}</span></td>
-                    <td>${fila.fecha_publicacion}</td>
-                    <td><a href="${fila.link}" target="_blank" class="btn btn-sm btn-outline-primary">Ver Pliego</a></td>
-                </tr>
-            `;
+            // Color distinto si es "Otros"
+            const badgeColor = fila.rubro_ia === 'Otros' ? 'bg-secondary' : 'bg-success';
+            
+            html += `<tr>
+                <td>${fila.titulo}</td>
+                <td><span class="badge ${badgeColor}">${fila.rubro_ia || 'Pendiente'}</span></td>
+                <td><a href="${fila.link}" target="_blank" class="btn btn-sm btn-outline-primary">Ver</a></td>
+            </tr>`;
         });
-
         html += `</tbody></table></body></html>`;
         res.send(html);
-    } catch (err) {
-        console.error(err);
-        res.status(500).send("Error al generar la tabla");
-    }
+    } catch (err) { res.status(500).send("Error"); }
 });
 
 // --- FUNCIONES DE LÓGICA ---
+// --- PROCESO PRINCIPAL ---
 async function analizarRSS() {
-    const url = generarURLRSS(); //"https://www.comprasestatales.gub.uy/consultas/rss/tipo-pub/ALL/tipo-fecha/MOD/orden/ORD_MOD/tipo-orden/DESC/rango-fecha/2026-01-15+00%3A00%3A00_2026-01-21+23%3A59%3A59";
+    const url = generarURLRSS();
 
     try {
         console.log("--- 📡 Conectando con ARCE... ---");
@@ -91,10 +141,9 @@ async function analizarRSS() {
         });
 
         const parser = new XMLParser();
-        const jObj = parser.parse(response.data);
-        const items = jObj.rss.channel.item;
-
-        console.log(`Leídas ${items.length} licitaciones.`);
+        const items = parser.parse(response.data).rss.channel.item || [];
+        
+        console.log(`Leídas ${items.length} licitaciones del RSS.`);
 
         let nuevas = 0;
         for (const item of items) {
@@ -109,43 +158,39 @@ async function analizarRSS() {
             if (res.rowCount > 0) nuevas++;
         }
 
-        console.log(`✅ Sincronización completa: ${nuevas} nuevas.`);
+        console.log(`✅ ${nuevas} nuevas insertadas.`);
+        
+        // Ejecutamos clasificación local
         await clasificarPendientes();
 
-    } catch (error) {
-        console.error("❌ Error en el proceso: ", error.message);
-    }
+    } catch (error) { console.error("Error en proceso:", error); }
 }
 
 async function clasificarPendientes() {
-    console.log("--- 🧠 Analizando con Gemini ---");
-    const res = await pool.query('SELECT id, titulo, descripcion FROM licitaciones WHERE analizado = FALSE LIMIT 10');
+    console.log("--- 📚 Clasificando con Diccionario Local ---");
+    
+    // Traemos todo lo que no esté analizado
+    const res = await pool.query('SELECT id, titulo, descripcion FROM licitaciones WHERE analizado = FALSE');
 
     for (const lic of res.rows) {
-        try {
-            const prompt = `Define el rubro de esta licitación uruguaya en UNA SOLA PALABRA (Ej: Software, Salud, Construcción, Limpieza).
-            Título: ${lic.titulo}
-            Categoría:`;
-
-            // Cambiamos la estructura para que coincida con lo que espera @google/genai
-            const result = await ai.models.generateContent({
-                model: "gemini-3-flash-preview", // Te recomiendo 1.5-flash por estabilidad
-                contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            });
-
-            // En @google/genai la respuesta está directamente en .text
-            const respuestaIA = result.text.trim().replace(/[^a-zA-ZáéíóúÁÉÍÓÚ]/g, "");
-
-            await pool.query(
-                'UPDATE licitaciones SET rubro_ia = $1, analizado = TRUE WHERE id = $2',
-                [respuestaIA, lic.id]
-            );
-
-            console.log(`🤖 ID ${lic.id} clasificado: ${respuestaIA}`);
-        } catch (err) {
-            console.error(`❌ Error en IA ID ${lic.id}:`, err.message);
+        // 1. Intentamos clasificar
+        let rubro = clasificarPorDiccionario(lic.titulo, lic.descripcion);
+        
+        // 2. Si es null, forzamos "Otros"
+        if (!rubro) {
+            rubro = "Otros";
         }
+
+        // 3. Guardamos en DB
+        await pool.query(
+            'UPDATE licitaciones SET rubro_ia = $1, analizado = TRUE WHERE id = $2',
+            [rubro, lic.id]
+        );
+        
+        // Log para ver qué está pasando (Opcional, puedes quitarlo si hay mucho ruido)
+         console.log(`ID ${lic.id} -> ${rubro}`);
     }
+    console.log(`✨ Se clasificaron ${res.rows.length} licitaciones.`);
 }
 
 
