@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import './App.css'
 import SearchBar from './components/SearchBar'
@@ -12,8 +12,15 @@ function App() {
   const [filtros, setFiltros] = useState({ buscar: '', rubro: '' })
   const [pagination, setPagination] = useState({ page: 1, limit: 20, total: 0, pages: 0 })
   const [inputPagina, setInputPagina] = useState('1')
+  const [nuevasLicitaciones, setNuevasLicitaciones] = useState(0)
+  const [autoRefresh, setAutoRefresh] = useState(true)
+  const [ultimaSincronizacion, setUltimaSincronizacion] = useState(null)
+  const pollingIntervalRef = useRef(null)
+  const sincronizacionIntervalRef = useRef(null)
 
   const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000'
+  const INTERVALO_POLLING = 30000 // 30 segundos - verificar nuevas licitaciones
+  const INTERVALO_SINCRONIZACION = 5 * 60000 // 5 minutos - sincronizar con RSS
 
   // Cargar rubros disponibles
   useEffect(() => {
@@ -27,12 +34,74 @@ function App() {
     setInputPagina(pagination.page.toString())
   }, [filtros, pagination.page])
 
+  // Auto-refresh: Polling para detectar nuevas licitaciones
+  useEffect(() => {
+    if (!autoRefresh) return
+
+    // Sincronización inicial inmediata
+    sincronizarConRSS()
+
+    // Polling: Verificar nuevas licitaciones cada 30 segundos
+    pollingIntervalRef.current = setInterval(() => {
+      verificarNuevasLicitaciones()
+    }, INTERVALO_POLLING)
+
+    // Sincronización con RSS cada 5 minutos
+    sincronizacionIntervalRef.current = setInterval(() => {
+      sincronizarConRSS()
+    }, INTERVALO_SINCRONIZACION)
+
+    return () => {
+      if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current)
+      if (sincronizacionIntervalRef.current) clearInterval(sincronizacionIntervalRef.current)
+    }
+  }, [autoRefresh])
+
   const cargarRubros = async () => {
     try {
       const response = await axios.get(`${API_URL}/api/rubros`)
       setRubros(Array.isArray(response.data) ? response.data : [])
     } catch (err) {
       console.error('Error cargando rubros:', err)
+    }
+  }
+
+  const verificarNuevasLicitaciones = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/api/licitaciones/nuevas`)
+      if (response.data.nuevas && response.data.nuevas > 0) {
+        setNuevasLicitaciones(response.data.nuevas)
+        setUltimaSincronizacion(response.data.ultimaSincronizacion)
+        console.log(`🔔 ${response.data.nuevas} nuevas licitaciones en la última sincronización`)
+      }
+    } catch (err) {
+      console.error('Error verificando nuevas licitaciones:', err)
+    }
+  }
+
+  const sincronizarConRSS = async () => {
+    try {
+      const response = await axios.post(`${API_URL}/api/sincronizar`)
+      if (response.data.nuevas > 0) {
+        console.log(`✅ Sincronización completada: ${response.data.nuevas} nuevas licitaciones`)
+        setNuevasLicitaciones(prev => prev + response.data.nuevas)
+      }
+    } catch (err) {
+      console.error('Error sincronizando con RSS:', err)
+    }
+  }
+
+  const actualizarLicitaciones = async () => {
+    setLoading(true)
+    try {
+      // Primero sincronizar con RSS
+      await sincronizarConRSS()
+      // Luego cargar las licitaciones
+      await cargarLicitaciones()
+      setNuevasLicitaciones(0)
+      setPagination(prev => ({ ...prev, page: 1 }))
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -50,6 +119,7 @@ function App() {
       
       // Manejar respuesta con paginación
       if (response.data.data && response.data.pagination) {
+        // El backend ya devuelve ordenadas por fecha DESC, no necesitamos ordenar aquí
         setLicitaciones(response.data.data)
         setPagination(response.data.pagination)
       } else if (Array.isArray(response.data)) {
@@ -124,6 +194,35 @@ function App() {
       <header className="header">
         <h1>🔍 Buscador de Licitaciones</h1>
         <p>Encuentra las mejores oportunidades de compras</p>
+        
+        <div className="header-controls">
+          <div className="refresh-status">
+            <span className={`status-dot ${autoRefresh ? 'active' : 'inactive'}`}></span>
+            <span className="status-text">
+              {autoRefresh ? 'Auto-actualización activa' : 'Auto-actualización inactiva'}
+            </span>
+            <button 
+              className="toggle-btn"
+              onClick={() => setAutoRefresh(!autoRefresh)}
+              title={autoRefresh ? 'Desactivar auto-actualización' : 'Activar auto-actualización'}
+            >
+              {autoRefresh ? '⏸' : '▶'}
+            </button>
+          </div>
+          
+          {nuevasLicitaciones > 0 && (
+            <div className="new-items-notification">
+              <span className="notification-badge">{nuevasLicitaciones}</span>
+              <button 
+                className="refresh-btn"
+                onClick={actualizarLicitaciones}
+                disabled={loading}
+              >
+                ⬇ {nuevasLicitaciones} nueva{nuevasLicitaciones !== 1 ? 's' : ''} licitación{nuevasLicitaciones !== 1 ? 'es' : ''}
+              </button>
+            </div>
+          )}
+        </div>
       </header>
 
       <main className="container">

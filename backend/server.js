@@ -91,6 +91,11 @@ function clasificarPorDiccionario(titulo, descripcion) {
 }
 
 // --- 4. LÓGICA DE RSS ---
+
+// Variable global para guardar cuándo fue la última sincronización
+let ultimaSincronizacion = new Date();
+let ultimasNuevasLicitaciones = 0;
+
 function generarURLRSS() {
     const hoy = new Date();
     const hace7 = new Date();
@@ -108,6 +113,9 @@ function generarURLRSS() {
 
 async function procesarLicitaciones() {
     const url = generarURLRSS();
+    // Guardar el timestamp ANTES de procesar para detectar nuevas licitaciones
+    const timestampSincronizacion = new Date();
+    
     try {
         console.log("--- 📡 Iniciando sincronización RSS... ---");
         const config = {
@@ -129,19 +137,27 @@ async function procesarLicitaciones() {
 
         let nuevas = 0;
         for (const item of items) {
+            // Convertir fecha RSS a timestamp ISO
+            const fechaPublicacion = new Date(item.pubDate).toISOString();
+            
             const query = `
                 INSERT INTO licitaciones (guid, titulo, link, fecha_publicacion, descripcion)
                 VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (guid) DO NOTHING
                 RETURNING id;
             `;
-            const values = [item.guid || item.link, item.title, item.link, item.pubDate, item.description];
+            const values = [item.guid || item.link, item.title, item.link, fechaPublicacion, item.description];
             const res = await pool.query(query, values);
             if (res.rowCount > 0) nuevas++;
         }
 
         console.log(`✅ ${nuevas} nuevas licitaciones.`);
         await clasificarPendientes();
+        
+        // Guardar el resultado de esta sincronización
+        ultimaSincronizacion = timestampSincronizacion;
+        ultimasNuevasLicitaciones = nuevas;
+        
         return { total: items.length, nuevas };
 
 } catch (error) {
@@ -174,6 +190,44 @@ async function clasificarPendientes() {
 }
 
 // --- 5. RUTAS DE LA API (ENDPOINTS) ---
+
+// GET: Verificar nuevas licitaciones desde la última sincronización
+app.get('/api/licitaciones/nuevas', async (req, res) => {
+    try {
+        // Retornar las licitaciones agregadas en la última sincronización
+        const resultado = await pool.query(
+            'SELECT id, titulo, organismo, rubro_ia, link, fecha_publicacion FROM licitaciones WHERE fecha_publicacion > $1 ORDER BY fecha_publicacion DESC LIMIT 20',
+            [ultimaSincronizacion]
+        );
+        
+        res.json({
+            nuevas: ultimasNuevasLicitaciones,
+            datos: resultado.rows,
+            ultimaSincronizacion: ultimaSincronizacion
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Error al obtener nuevas licitaciones' });
+    }
+});
+
+// GET: Obtener última licitación (para verificar actualizaciones)
+app.get('/api/licitaciones/ultima', async (req, res) => {
+    try {
+        const resultado = await pool.query(
+            'SELECT fecha_publicacion FROM licitaciones ORDER BY fecha_publicacion DESC LIMIT 1'
+        );
+        
+        if (resultado.rows.length === 0) {
+            res.json({ ultimaActualizacion: null });
+        } else {
+            res.json({ ultimaActualizacion: resultado.rows[0].fecha_publicacion });
+        }
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Error al obtener última licitación' });
+    }
+});
 
 // GET: Listar licitaciones
 app.get('/api/licitaciones', async (req, res) => {
@@ -248,10 +302,23 @@ app.get('/api/health', (req, res) => res.send('API funcionando 🚀'));
 
 // --- 6. INICIAR SERVIDOR ---
 
-// Ejecutamos una carga inicial al arrancar (opcional)
+// Ejecutamos una carga inicial al arrancar
+console.log('📚 Iniciando aplicación...');
 procesarLicitaciones();
+
+// Sincronización automática cada 5 minutos (300000 ms)
+const INTERVALO_SINCRONIZACION = 5 * 60 * 1000;
+setInterval(() => {
+    console.log('⏰ Ejecutando sincronización automática...');
+    procesarLicitaciones().catch(error => {
+        console.error('❌ Error en sincronización automática:', error.message);
+    });
+}, INTERVALO_SINCRONIZACION);
+
+console.log(`✅ Sincronización automática configurada cada ${INTERVALO_SINCRONIZACION / 1000} segundos`);
 
 app.listen(PORT, () => {
     console.log(`🚀 Backend corriendo en http://localhost:${PORT}`);
     console.log(`🔧 Frontend permitido desde: ${whitelist.join(', ')}`);
+    console.log('📡 Sistema de RSS activo - buscando nuevas licitaciones...');
 });
