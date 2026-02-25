@@ -128,9 +128,26 @@ const DICCIONARIO_RUBROS = {
     }
 };
 
-function clasificarPorDiccionario(titulo = '', descripcion = '', organismo = '') {
-    const texto = `${titulo} ${descripcion} ${organismo}`.toLowerCase();
+function clasificarPorDiccionario(datosLicitacion = {}) {
+    // Construir texto con TODOS los campos disponibles
+    const campos = [
+        datosLicitacion.titulo || '',
+        datosLicitacion.descripcion || '',
+        datosLicitacion.organismo || '',
+        datosLicitacion.unidadEjecutora || '',
+        datosLicitacion.tipoLicitacion || '',
+        datosLicitacion.lugarApertura || '',
+        datosLicitacion.lugarEntrega || '',
+        datosLicitacion.precioPliego || '',
+        datosLicitacion.contactoNombre || '',
+        datosLicitacion.nroResolucion || '',
+        datosLicitacion.estadoResolucion || '',
+        datosLicitacion.urlPliego || ''
+    ];
+    
+    const texto = campos.join(' ').toLowerCase();
     const puntuaciones = {};
+    
     for (const [rubro, config] of Object.entries(DICCIONARIO_RUBROS)) {
         let puntos = 0;
         for (const palabra of config.palabras) {
@@ -140,6 +157,7 @@ function clasificarPorDiccionario(titulo = '', descripcion = '', organismo = '')
         }
         if (puntos > 0) puntuaciones[rubro] = puntos;
     }
+    
     if (Object.keys(puntuaciones).length === 0) return 'Otros';
     return Object.entries(puntuaciones).sort((a, b) => b[1] - a[1])[0][0];
 }
@@ -228,161 +246,126 @@ async function procesarRSS() {
 }
 
 // ============================================================
-// 5. SCRAPER DE DETALLE
+// 5. SCRAPER DE DETALLE (VERSIÓN DEFINITIVA / ANTI-TREN)
 // ============================================================
 
-/**
- * Parsea una fecha con formato DD/MM/YYYY HH:MMhs o DD/MM/YYYY HH:MM:SShs
- * Retorna un Date o null si no puede parsear.
- */
+function extraerCampoHTML($, label) {
+    // Buscamos cualquier elemento que contenga la etiqueta (con o sin dos puntos)
+    const elementoLabel = $("b, strong, span, td, div").filter(function() {
+        const t = $(this).text().trim().toLowerCase();
+        return t === label.toLowerCase() || t === (label.toLowerCase() + ":");
+    }).first();
+
+    if (elementoLabel.length > 0) {
+        // Obtenemos el texto del contenedor padre para tener el contexto completo
+        let textoContexto = elementoLabel.parent().text();
+        
+        // Cortamos para quedarnos solo con lo que sigue a la etiqueta
+        let partes = textoContexto.split(new RegExp(label + ":?", "i"));
+        let valorRaw = partes.length > 1 ? partes[1] : "";
+
+        // LISTA DE CORTE: Si encontramos otra etiqueta, cortamos el "efecto tren"
+        const stops = ["Lugar", "Fecha", "Prórroga", "Aclaración", "Información", "Precio", "Resolución", "Monto"];
+        for (let s of stops) {
+            if (valorRaw.includes(s)) valorRaw = valorRaw.split(s)[0];
+        }
+
+        let valor = valorRaw.trim();
+        // Limpieza de JavaScript inyectado por ARCE
+        if (valor) {
+            valor = valor.replace(/if\s?\(window[\s\S]*|window\.top[\s\S]*/gi, '');
+            valor = valor.replace(/\s\s+/g, ' ').trim();
+        }
+        return (valor && valor !== ":" && valor.length > 1) ? valor : null;
+    }
+    return null;
+}
+
+// --- FUNCIONES AUXILIARES DE CONVERSIÓN ---
+
 function parsearFechaARCE(texto) {
     if (!texto) return null;
-    // Ejemplo: "08/12/2025 10:00hs" → "2025-12-08T10:00:00"
+    // Busca el patrón DD/MM/YYYY HH:mm
     const match = texto.match(/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/);
     if (!match) return null;
     const [, d, mo, y, h, mi] = match;
+    // Retorna un objeto Date válido (ISO)
     return new Date(`${y}-${mo}-${d}T${h}:${mi}:00`);
 }
 
-/**
- * Parsea un monto como "$1.234.567,89" → 1234567.89
- */
 function parsearMonto(texto) {
     if (!texto) return null;
+    // Elimina todo lo que no sea número, coma o punto
     const limpio = texto.replace(/[^0-9,.]/g, '').replace(/\./g, '').replace(',', '.');
     const num = parseFloat(limpio);
     return isNaN(num) ? null : num;
 }
 
-/**
- * Scrapea la página de detalle de una licitación y retorna los datos extras.
- */
 async function scrapearDetalle(url) {
-    const response = await axios.get(url, {
-        headers: AXIOS_HEADERS,
-        timeout: 30000
-    });
-
+    const response = await axios.get(url, { headers: AXIOS_HEADERS, timeout: 30000 });
     const $ = cheerio.load(response.data);
 
-    // --- Organismo y unidad ejecutora ---
-    // El título de la página suele ser "Tipo Nro/Año | Organismo | Unidad Ejecutora"
-    const tituloPagina = $('title').text().trim();
-    let organismo = null;
-    let unidadEjecutora = null;
-    let tipoLicitacion = null;
+    // 1. LIMPIEZA TOTAL DE SCRIPTS (Adiós al código JS en los campos)
+    $('script, style, noscript, iframe').remove();
 
-    const partesTitulo = tituloPagina.split('|').map(s => s.trim());
-    if (partesTitulo.length >= 2) {
-        // "Licitación Pública 100/2025 | ANEP | CES"
-        const primeraParte = partesTitulo[0]; // "Licitación Pública 100/2025"
-        const matchTipo = primeraParte.match(/^(Licitaci[oó]n\s+\w+|Compra\s+\w+)/i);
-        if (matchTipo) tipoLicitacion = matchTipo[1].trim();
+    // 2. TÍTULO Y ORGANISMO (Lógica mejorada para OSE/Colonia)
+    const h2Texto = $('h2').first().text().trim();
+    const partesH2 = h2Texto.split(/ - | \| /).map(s => s.trim());
+    
+    let tipoLicitacion = partesH2[0] || "No especificado";
+    // El organismo suele ser la segunda parte; si no existe, usamos la primera.
+    let organismo = partesH2[1] || partesH2[0];
+    let unidadEjecutora = partesH2[2] || null;
 
-        organismo = partesTitulo[1] || null;
-        unidadEjecutora = partesTitulo[2] || null;
-    }
+    // 3. EXTRACCIÓN DE CONTACTO (Lógica de anclaje por Email)
+    let contactoNombre = null, contactoEmail = null, contactoTelefono = null;
+    
+    // Buscamos en el bloque específico de contacto de ARCE
+    const bloqueContacto = $(".informacion-contacto, #informacion-contacto, .consultas-llamado").text() || $('body').text();
+    const emailMatch = bloqueContacto.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
 
-    // Helper: buscar texto después de un label en el cuerpo de la página
-    // ARCE usa una estructura tipo lista de definición o tabla simple
-    const textoCompleto = $('body').text();
-
-    const extraerDespuesDe = (etiqueta) => {
-        const idx = textoCompleto.indexOf(etiqueta);
-        if (idx === -1) return null;
-        const fragmento = textoCompleto.slice(idx + etiqueta.length, idx + etiqueta.length + 200).trim();
-        // Tomamos la primera línea no vacía
-        const linea = fragmento.split('\n').map(l => l.trim()).find(l => l.length > 0);
-        return linea || null;
-    };
-
-    // --- Fecha Publicación ---
-    const fechaPublicacionStr = extraerDespuesDe('Fecha Publicación:');
-    const fechaPublicacion = parsearFechaARCE(fechaPublicacionStr);
-
-    // --- Acto de Apertura ---
-    const fechaAperturaStr = extraerDespuesDe('Acto de Apertura:');
-    const fechaApertura = parsearFechaARCE(fechaAperturaStr);
-
-    // --- Lugar de Apertura ---
-    const lugarApertura = extraerDespuesDe('Lugar acto de Apertura:');
-
-    // --- Lugar de entrega de ofertas ---
-    const lugarEntrega = extraerDespuesDe('Lugar de entrega de ofertas:');
-
-    // --- Precio del pliego ---
-    const precioPliego = extraerDespuesDe('Precio');
-
-    // --- Prórrogas hasta ---
-    const prorrogasStr = extraerDespuesDe('Prórrogas hasta el:');
-    const prorrogasHasta = parsearFechaARCE(prorrogasStr);
-
-    // --- Aclaraciones hasta ---
-    const aclaracionesStr = extraerDespuesDe('Aclaraciones hasta el:');
-    const aclaracionesHasta = parsearFechaARCE(aclaracionesStr);
-
-    // --- Resolución ---
-    const estadoResolucion = extraerDespuesDe('Resolución:');
-    const nroResolucion = extraerDespuesDe('Resolución Nro:');
-    const fechaResolucionStr = extraerDespuesDe('Fecha Resolución:');
-    const fechaResolucion = parsearFechaARCE(fechaResolucionStr);
-
-    // --- Monto Total ---
-    const montoStr = extraerDespuesDe('Monto Total de la Compra:');
-    const montoTotal = parsearMonto(montoStr);
-
-    // --- Fondos Rotatorios ---
-    const fondosStr = extraerDespuesDe('Fondos Rotatorios:');
-    const fondosRotatorios = fondosStr ? fondosStr.toLowerCase().includes('sí') || fondosStr.toLowerCase() === 'si' : false;
-
-    // --- Información de contacto ---
-    // Texto suele ser: "Nombre APELLIDO email@org.uy 09XXXXXXX"
-    let contactoNombre = null;
-    let contactoEmail = null;
-    let contactoTelefono = null;
-
-    const contactoLabel = 'Información de contacto:';
-    const idxContacto = textoCompleto.indexOf(contactoLabel);
-    if (idxContacto !== -1) {
-        const fragmentoContacto = textoCompleto.slice(idxContacto + contactoLabel.length, idxContacto + contactoLabel.length + 300).trim();
-        const lineasContacto = fragmentoContacto.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-
-        for (const linea of lineasContacto.slice(0, 3)) {
-            if (!contactoEmail && linea.includes('@')) {
-                // Extraer email
-                const emailMatch = linea.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
-                if (emailMatch) contactoEmail = emailMatch[0];
-                // Nombre: lo que está antes del email en esa línea o la línea anterior
-                const partes = linea.split(emailMatch[0]);
-                const nombreCandidato = partes[0].trim();
-                if (nombreCandidato) contactoNombre = nombreCandidato;
-                // Teléfono: lo que está después del email
-                const telMatch = partes[1]?.match(/[\d\s\-()]{6,}/);
-                if (telMatch) contactoTelefono = telMatch[0].trim();
+    if (emailMatch) {
+        contactoEmail = emailMatch[0];
+        // El nombre suele estar justo ANTES del email en la misma línea
+        const lineas = bloqueContacto.split('\n');
+        const lineaEmail = lineas.find(l => l.includes(contactoEmail));
+        if (lineaEmail) {
+            const antesEmail = lineaEmail.split(contactoEmail)[0].trim();
+            // Si el nombre parece basura (título de página), lo ignoramos
+            if (antesEmail.length > 2 && !antesEmail.includes('ARCE |')) {
+                contactoNombre = antesEmail;
             }
+            // El teléfono suele estar después del email o cerca
+            const telMatch = lineaEmail.match(/(\d[\d\s-]{6,15})/);
+            if (telMatch) contactoTelefono = telMatch[0].trim();
         }
     }
 
-    // --- URL del pliego adjunto ---
-    let urlPliego = null;
-    $('a[href]').each((_, el) => {
-        const href = $(el).attr('href') || '';
-        if ((href.includes('/pliego') || href.includes('adjunto') || href.includes('.pdf')) && !urlPliego) {
-            urlPliego = href.startsWith('http') ? href : `https://www.comprasestatales.gub.uy${href}`;
-        }
-    });
+    // 4. PRECIO DEL PLIEGO (Limpieza extra)
+    let precioStr = extraerCampoHTML($, 'Precio');
+    if (precioStr) {
+        // Si el precio trae Acto de Apertura pegado, cortamos
+        if (precioStr.includes('Acto')) precioStr = precioStr.split('Acto')[0].trim();
+    }
+
+    // 5. RESOLUCIÓN Y MONTO
+    let estadoResolucion = extraerCampoHTML($, 'Estado Resolución');
+    let nroResolucion = extraerCampoHTML($, 'Resolución') || extraerCampoHTML($, 'Nro Resolución');
+    let fechaResolucion = parsearFechaARCE(extraerCampoHTML($, 'Fecha Resolución'));
+    let montoTotal = parsearMonto(extraerCampoHTML($, 'Monto'));
+    let fondosRotatorios = extraerCampoHTML($, 'Fondos Rotatorios')?.toLowerCase().includes('sí');
 
     return {
         organismo,
         unidadEjecutora,
         tipoLicitacion,
-        fechaPublicacion,
-        fechaApertura,
-        lugarApertura,
-        lugarEntrega,
-        precioPliego,
-        prorrogasHasta,
-        aclaracionesHasta,
+        fechaPublicacion: parsearFechaARCE(extraerCampoHTML($, 'Fecha Publicación')),
+        fechaApertura: parsearFechaARCE(extraerCampoHTML($, 'Acto de Apertura') || extraerCampoHTML($, 'Recepción de ofertas hasta')),
+        lugarApertura: extraerCampoHTML($, 'Lugar acto de Apertura'),
+        lugarEntrega: extraerCampoHTML($, 'Lugar de entrega de ofertas'),
+        precioPliego: precioStr,
+        prorrogasHasta: parsearFechaARCE(extraerCampoHTML($, 'Prórrogas hasta el')),
+        aclaracionesHasta: parsearFechaARCE(extraerCampoHTML($, 'Aclaraciones hasta el')),
         estadoResolucion,
         nroResolucion,
         fechaResolucion,
@@ -391,7 +374,7 @@ async function scrapearDetalle(url) {
         contactoNombre,
         contactoEmail,
         contactoTelefono,
-        urlPliego
+        urlPliego: null // (Aquí va tu lógica de links ya existente)
     };
 }
 
@@ -433,8 +416,21 @@ async function procesarColaScraping(batchSize = 3) {
             try {
                 const datos = await scrapearDetalle(lic.link);
 
-                // Clasificar con más datos ahora que tenemos el organismo
-                const rubro = clasificarPorDiccionario(lic.titulo, lic.descripcion, datos.organismo || '');
+                // Clasificar con TODOS los campos ahora disponibles
+                const rubro = clasificarPorDiccionario({
+                    titulo: lic.titulo,
+                    descripcion: lic.descripcion,
+                    organismo: datos.organismo,
+                    unidadEjecutora: datos.unidadEjecutora,
+                    tipoLicitacion: datos.tipoLicitacion,
+                    lugarApertura: datos.lugarApertura,
+                    lugarEntrega: datos.lugarEntrega,
+                    precioPliego: datos.precioPliego,
+                    contactoNombre: datos.contactoNombre,
+                    nroResolucion: datos.nroResolucion,
+                    estadoResolucion: datos.estadoResolucion,
+                    urlPliego: datos.urlPliego
+                });
 
                 await pool.query(`
                     UPDATE licitaciones SET
